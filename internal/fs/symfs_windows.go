@@ -429,7 +429,7 @@ func (s *SymFS) watch() {
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil,
 		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OVERLAPPED,
+		windows.FILE_FLAG_BACKUP_SEMANTICS,
 		0,
 	)
 	if err != nil {
@@ -497,9 +497,15 @@ func (s *SymFS) watch() {
 func (s *SymFS) fillStat(stat *fuse.Stat_t, fi os.FileInfo) {
 	stat.Size = fi.Size()
 	stat.Mtim = fuse.NewTimespec(fi.ModTime())
-	stat.Atim = stat.Mtim
-	stat.Ctim = stat.Mtim
-	stat.Birthtim = stat.Mtim
+	if sys, ok := fi.Sys().(*syscall.Win32FileAttributeData); ok {
+		stat.Atim = fuse.NewTimespec(time.Unix(0, sys.LastAccessTime.Nanoseconds()))
+		stat.Birthtim = fuse.NewTimespec(time.Unix(0, sys.CreationTime.Nanoseconds()))
+		stat.Ctim = stat.Mtim
+	} else {
+		stat.Atim = stat.Mtim
+		stat.Ctim = stat.Mtim
+		stat.Birthtim = stat.Mtim
+	}
 	mode := uint32(fi.Mode() & os.ModePerm)
 	if fi.IsDir() {
 		mode |= fuse.S_IFDIR
