@@ -3,3 +3,5 @@
 .devcontainer/
 testdata/
 vendor/
+*.exe
+*.exe~
