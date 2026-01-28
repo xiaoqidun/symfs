@@ -269,7 +269,7 @@ func (s *SymFS) Release(path string, fh uint64) int {
 func (s *SymFS) Fsync(path string, datasync bool, fh uint64) int {
 	err := syscall.FlushFileBuffers(syscall.Handle(fh))
 	if err != nil {
-		if errno, ok := err.(syscall.Errno); ok && errno == syscall.ERROR_ACCESS_DENIED {
+		if sysErr, ok := err.(syscall.Errno); ok && sysErr == syscall.ERROR_ACCESS_DENIED {
 			return 0
 		}
 		return errno(err)
@@ -408,7 +408,7 @@ func (s *SymFS) open(path string, flags int, mode uint32) (int, uint64) {
 		err := windows.SetEndOfFile(h)
 		if err != nil {
 			windows.CloseHandle(h)
-			h, err = windows.CreateFile(pathPtr, windows.GENERIC_WRITE, shareMode, nil, windows.TRUNCATE_EXISTING, attrs, 0)
+			h, err = windows.CreateFile(pathPtr, access, shareMode, nil, windows.TRUNCATE_EXISTING, attrs, 0)
 			if err != nil {
 				return errno(err), ^uint64(0)
 			}
