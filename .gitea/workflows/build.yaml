@@ -1,0 +1,24 @@
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: cn
+    steps:
+      - name: checkout
+        uses: actions/checkout@v6
+      - name: docker goenv
+        uses: docker://ccr.ccs.tencentyun.com/xiaoqidun/goenv:latest
+        env:
+          GIT_SERVER: ${{ secrets.git_server }}
+          GIT_USER: ${{ secrets.git_user }}
+          GIT_TOKEN: ${{ secrets.git_token }}
+        with:
+          args: bash .gitea/workflows/build.sh
+      - name: upload to cos
+        uses: xiaoqidun/gocos@main
+        with:
+          secret_id: ${{ secrets.cos_secret_id }}
+          secret_key: ${{ secrets.cos_secret_key }}
+          bucket_url: ${{ secrets.cos_bucket_url }}
+          source_path: release
+          target_path: product/symfs
+          strip_prefix: release
