@@ -16,7 +16,6 @@ package fs
 
 import (
 	"os"
-	"path"
 	"strings"
 	"syscall"
 	"time"
@@ -481,10 +480,6 @@ func (s *SymFS) watch() {
 			}
 			if info.FileNameLength > 0 {
 				s.host.Notify(fullPath, fuseAction)
-				dir := path.Dir(fullPath)
-				if dir != "/" {
-					s.host.Notify(dir, fuseAction)
-				}
 			}
 			if info.NextEntryOffset == 0 {
 				break
