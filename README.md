@@ -15,11 +15,15 @@
 | Windows | ARM64 | [下载](https://aite.xyz/product/symfs/symfs_windows_arm64.exe) | [下载](https://aite.xyz/product/symfs/symfs_windows_arm64_daemon.exe) |
 
 # 使用指南
-```powershell
-# 基本用法
-.\symfs.exe <源目录> <挂载点>
+**CMD**
+```cmd
+symfs.exe <源目录> <挂载点>
+symfs.exe D:\Source D:\Target
+```
 
-# 使用示例
+**PowerShell**
+```powershell
+.\symfs.exe <源目录> <挂载点>
 .\symfs.exe D:\Source D:\Target
 ```
 
