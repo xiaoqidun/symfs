@@ -463,7 +463,7 @@ func (s *SymFS) watch() {
 		for {
 			info := (*FileNotifyInformation)(unsafe.Pointer(&buf[offset]))
 			length := info.FileNameLength / 2
-			nameSlice := (*[1 << 30]uint16)(unsafe.Pointer(&info.FileName[0]))[:length:length]
+			nameSlice := (*[1 << 16]uint16)(unsafe.Pointer(&info.FileName[0]))[:length:length]
 			fileName := syscall.UTF16ToString(nameSlice)
 			fileName = strings.ReplaceAll(fileName, "\\", "/")
 			fullPath := "/" + fileName
