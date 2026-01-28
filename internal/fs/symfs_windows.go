@@ -41,8 +41,8 @@ func errno(err error) int {
 	if err == nil {
 		return 0
 	}
-	if errno, ok := err.(syscall.Errno); ok {
-		return -int(errno)
+	if sysErr, ok := err.(syscall.Errno); ok {
+		return -int(sysErr)
 	}
 	return -int(fuse.ENOENT)
 }
@@ -164,11 +164,13 @@ func (s *SymFS) Chown(path string, uid uint32, gid uint32) int {
 // 入参: path 路径, tmsp 时间戳数组
 // 返回: int 错误码
 func (s *SymFS) Utimens(path string, tmsp []fuse.Timespec) int {
+	if len(tmsp) < 2 {
+		return -int(fuse.EINVAL)
+	}
 	path = s.realPath(path)
 	atime := time.Unix(tmsp[0].Sec, tmsp[0].Nsec)
 	mtime := time.Unix(tmsp[1].Sec, tmsp[1].Nsec)
-	err := os.Chtimes(path, atime, mtime)
-	return errno(err)
+	return errno(os.Chtimes(path, atime, mtime))
 }
 
 // Access 检查文件访问权限
