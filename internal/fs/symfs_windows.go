@@ -253,7 +253,13 @@ func (s *SymFS) Write(path string, buff []byte, ofst int64, fh uint64) int {
 // 入参: path 路径, fh 文件句柄
 // 返回: int 错误码
 func (s *SymFS) Flush(path string, fh uint64) int {
-	syscall.FlushFileBuffers(syscall.Handle(fh))
+	err := syscall.FlushFileBuffers(syscall.Handle(fh))
+	if err != nil {
+		if sysErr, ok := err.(syscall.Errno); ok && sysErr == syscall.ERROR_ACCESS_DENIED {
+			return 0
+		}
+		return errno(err)
+	}
 	return 0
 }
 
