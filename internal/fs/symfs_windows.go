@@ -465,9 +465,16 @@ func (s *SymFS) watch() {
 		if err != nil {
 			return
 		}
+		headerSize := uint32(unsafe.Offsetof(FileNotifyInformation{}.FileName))
 		var offset uint32
 		for {
+			if offset+headerSize > bytesReturned {
+				break
+			}
 			info := (*FileNotifyInformation)(unsafe.Pointer(&buf[offset]))
+			if offset+headerSize+info.FileNameLength > bytesReturned {
+				break
+			}
 			length := info.FileNameLength / 2
 			nameSlice := (*[1 << 16]uint16)(unsafe.Pointer(&info.FileName[0]))[:length:length]
 			fileName := syscall.UTF16ToString(nameSlice)
