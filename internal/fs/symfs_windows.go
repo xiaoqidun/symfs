@@ -48,11 +48,13 @@ func errno(err error) int {
 
 // Init 初始化文件系统
 func (s *SymFS) Init() {
+	s.done = make(chan struct{})
 	go s.watch()
 }
 
 // Destroy 销毁文件系统
 func (s *SymFS) Destroy() {
+	close(s.done)
 }
 
 // Statfs 获取文件系统统计信息
@@ -412,7 +414,7 @@ func (s *SymFS) open(path string, flags int, mode uint32) (int, uint64) {
 		return errno(err), ^uint64(0)
 	}
 	if needTruncate {
-		err := windows.SetEndOfFile(h)
+		err = windows.SetEndOfFile(h)
 		if err != nil {
 			windows.CloseHandle(h)
 			h, err = windows.CreateFile(pathPtr, access, shareMode, nil, windows.TRUNCATE_EXISTING, attrs, 0)
@@ -436,16 +438,27 @@ func (s *SymFS) watch() {
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil,
 		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_BACKUP_SEMANTICS,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OVERLAPPED,
 		0,
 	)
 	if err != nil {
 		return
 	}
 	defer windows.CloseHandle(h)
+	event, err := windows.CreateEvent(nil, 0, 0, nil)
+	if err != nil {
+		return
+	}
+	defer windows.CloseHandle(event)
 	buf := make([]byte, 16384)
 	for {
-		var bytesReturned uint32
+		select {
+		case <-s.done:
+			return
+		default:
+		}
+		var overlapped windows.Overlapped
+		overlapped.HEvent = event
 		err = windows.ReadDirectoryChanges(
 			h,
 			&buf[0],
@@ -458,10 +471,27 @@ func (s *SymFS) watch() {
 				windows.FILE_NOTIFY_CHANGE_LAST_WRITE|
 				windows.FILE_NOTIFY_CHANGE_CREATION|
 				windows.FILE_NOTIFY_CHANGE_SECURITY,
-			&bytesReturned,
 			nil,
+			(*windows.Overlapped)(unsafe.Pointer(&overlapped)),
 			0,
 		)
+		if err != nil && err != windows.ERROR_IO_PENDING {
+			return
+		}
+		for {
+			result, _ := windows.WaitForSingleObject(event, 100)
+			if result == uint32(windows.WAIT_OBJECT_0) {
+				break
+			}
+			select {
+			case <-s.done:
+				windows.CancelIo(h)
+				return
+			default:
+			}
+		}
+		var bytesReturned uint32
+		err = windows.GetOverlappedResult(h, (*windows.Overlapped)(unsafe.Pointer(&overlapped)), &bytesReturned, false)
 		if err != nil {
 			return
 		}

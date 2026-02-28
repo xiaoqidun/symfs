@@ -25,6 +25,7 @@ type SymFS struct {
 	fuse.FileSystemBase
 	root string
 	host *fuse.FileSystemHost
+	done chan struct{}
 }
 
 // NewSymFS 创建 SymFS 实例
