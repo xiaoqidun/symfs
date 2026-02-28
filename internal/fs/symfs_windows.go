@@ -43,7 +43,7 @@ func errno(err error) int {
 	if sysErr, ok := err.(syscall.Errno); ok {
 		return -int(sysErr)
 	}
-	return -int(fuse.ENOENT)
+	return -int(fuse.EIO)
 }
 
 // Init 初始化文件系统
