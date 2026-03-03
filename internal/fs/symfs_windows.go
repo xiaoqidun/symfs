@@ -15,6 +15,7 @@
 package fs
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"syscall"
@@ -33,6 +34,38 @@ type FileNotifyInformation struct {
 	FileName        [1]uint16
 }
 
+// winErrToFuse Windows 错误码到 FUSE POSIX errno 的映射表
+var winErrToFuse = map[syscall.Errno]int{
+	windows.ERROR_FILE_NOT_FOUND:       int(fuse.ENOENT),
+	windows.ERROR_PATH_NOT_FOUND:       int(fuse.ENOENT),
+	windows.ERROR_ACCESS_DENIED:        int(fuse.EACCES),
+	windows.ERROR_INVALID_HANDLE:       int(fuse.EBADF),
+	windows.ERROR_NOT_ENOUGH_MEMORY:    int(fuse.ENOMEM),
+	windows.ERROR_OUTOFMEMORY:          int(fuse.ENOMEM),
+	windows.ERROR_INVALID_DRIVE:        int(fuse.ENOENT),
+	windows.ERROR_NO_MORE_FILES:        int(fuse.ENOENT),
+	windows.ERROR_WRITE_PROTECT:        int(fuse.EROFS),
+	windows.ERROR_NOT_READY:            int(fuse.EIO),
+	windows.ERROR_SHARING_VIOLATION:    int(fuse.EBUSY),
+	windows.ERROR_LOCK_VIOLATION:       int(fuse.EBUSY),
+	windows.ERROR_HANDLE_EOF:           int(fuse.EIO),
+	windows.ERROR_HANDLE_DISK_FULL:     int(fuse.ENOSPC),
+	windows.ERROR_NOT_SUPPORTED:        int(fuse.ENOSYS),
+	windows.ERROR_INVALID_PARAMETER:    int(fuse.EINVAL),
+	windows.ERROR_INSUFFICIENT_BUFFER:  int(fuse.EINVAL),
+	windows.ERROR_INVALID_NAME:         int(fuse.ENOENT),
+	windows.ERROR_DIR_NOT_EMPTY:        int(fuse.ENOTEMPTY),
+	windows.ERROR_ALREADY_EXISTS:       int(fuse.EEXIST),
+	windows.ERROR_FILE_EXISTS:          int(fuse.EEXIST),
+	windows.ERROR_BROKEN_PIPE:          int(fuse.EPIPE),
+	windows.ERROR_DISK_FULL:            int(fuse.ENOSPC),
+	windows.ERROR_CALL_NOT_IMPLEMENTED: int(fuse.ENOSYS),
+	windows.ERROR_NEGATIVE_SEEK:        int(fuse.EINVAL),
+	windows.ERROR_SEEK_ON_DEVICE:       int(fuse.ESPIPE),
+	windows.ERROR_DIRECTORY:            int(fuse.ENOTDIR),
+	windows.ERROR_NOT_EMPTY:            int(fuse.ENOTEMPTY),
+}
+
 // errno 转换错误码
 // 入参: err 错误对象
 // 返回: int 错误码
@@ -40,8 +73,11 @@ func errno(err error) int {
 	if err == nil {
 		return 0
 	}
-	if sysErr, ok := err.(syscall.Errno); ok {
-		return -int(sysErr)
+	var sysErr syscall.Errno
+	if errors.As(err, &sysErr) {
+		if fuseErr, ok := winErrToFuse[sysErr]; ok {
+			return -fuseErr
+		}
 	}
 	return -int(fuse.EIO)
 }
