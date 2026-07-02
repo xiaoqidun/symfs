@@ -17,6 +17,7 @@ package fs
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -34,36 +35,50 @@ type FileNotifyInformation struct {
 	FileName        [1]uint16
 }
 
+const invalidFileHandle = ^uint64(0)
+
 // winErrToFuse Windows 错误码到 FUSE POSIX errno 的映射表
 var winErrToFuse = map[syscall.Errno]int{
-	windows.ERROR_FILE_NOT_FOUND:       int(fuse.ENOENT),
-	windows.ERROR_PATH_NOT_FOUND:       int(fuse.ENOENT),
-	windows.ERROR_ACCESS_DENIED:        int(fuse.EACCES),
-	windows.ERROR_INVALID_HANDLE:       int(fuse.EBADF),
-	windows.ERROR_NOT_ENOUGH_MEMORY:    int(fuse.ENOMEM),
-	windows.ERROR_OUTOFMEMORY:          int(fuse.ENOMEM),
-	windows.ERROR_INVALID_DRIVE:        int(fuse.ENOENT),
-	windows.ERROR_NO_MORE_FILES:        int(fuse.ENOENT),
-	windows.ERROR_WRITE_PROTECT:        int(fuse.EROFS),
-	windows.ERROR_NOT_READY:            int(fuse.EIO),
-	windows.ERROR_SHARING_VIOLATION:    int(fuse.EBUSY),
-	windows.ERROR_LOCK_VIOLATION:       int(fuse.EBUSY),
-	windows.ERROR_HANDLE_EOF:           int(fuse.EIO),
-	windows.ERROR_HANDLE_DISK_FULL:     int(fuse.ENOSPC),
-	windows.ERROR_NOT_SUPPORTED:        int(fuse.ENOSYS),
-	windows.ERROR_INVALID_PARAMETER:    int(fuse.EINVAL),
-	windows.ERROR_INSUFFICIENT_BUFFER:  int(fuse.EINVAL),
-	windows.ERROR_INVALID_NAME:         int(fuse.ENOENT),
-	windows.ERROR_DIR_NOT_EMPTY:        int(fuse.ENOTEMPTY),
-	windows.ERROR_ALREADY_EXISTS:       int(fuse.EEXIST),
-	windows.ERROR_FILE_EXISTS:          int(fuse.EEXIST),
-	windows.ERROR_BROKEN_PIPE:          int(fuse.EPIPE),
-	windows.ERROR_DISK_FULL:            int(fuse.ENOSPC),
-	windows.ERROR_CALL_NOT_IMPLEMENTED: int(fuse.ENOSYS),
-	windows.ERROR_NEGATIVE_SEEK:        int(fuse.EINVAL),
-	windows.ERROR_SEEK_ON_DEVICE:       int(fuse.ESPIPE),
-	windows.ERROR_DIRECTORY:            int(fuse.ENOTDIR),
-	windows.ERROR_NOT_EMPTY:            int(fuse.ENOTEMPTY),
+	windows.ERROR_INVALID_FUNCTION:      int(fuse.EINVAL),
+	windows.ERROR_FILE_NOT_FOUND:        int(fuse.ENOENT),
+	windows.ERROR_PATH_NOT_FOUND:        int(fuse.ENOENT),
+	windows.ERROR_ACCESS_DENIED:         int(fuse.EACCES),
+	windows.ERROR_INVALID_HANDLE:        int(fuse.EBADF),
+	windows.ERROR_TOO_MANY_OPEN_FILES:   int(fuse.EMFILE),
+	windows.ERROR_NOT_ENOUGH_MEMORY:     int(fuse.ENOMEM),
+	windows.ERROR_OUTOFMEMORY:           int(fuse.ENOMEM),
+	windows.ERROR_INVALID_DRIVE:         int(fuse.ENOENT),
+	windows.ERROR_NO_MORE_FILES:         int(fuse.ENOENT),
+	windows.ERROR_WRITE_PROTECT:         int(fuse.EROFS),
+	windows.ERROR_NOT_READY:             int(fuse.EIO),
+	windows.ERROR_SHARING_VIOLATION:     int(fuse.EBUSY),
+	windows.ERROR_LOCK_VIOLATION:        int(fuse.EBUSY),
+	windows.ERROR_HANDLE_EOF:            int(fuse.EIO),
+	windows.ERROR_HANDLE_DISK_FULL:      int(fuse.ENOSPC),
+	windows.ERROR_NOT_SUPPORTED:         int(fuse.ENOSYS),
+	windows.ERROR_INVALID_PARAMETER:     int(fuse.EINVAL),
+	windows.ERROR_INSUFFICIENT_BUFFER:   int(fuse.EINVAL),
+	windows.ERROR_INVALID_NAME:          int(fuse.ENOENT),
+	windows.ERROR_DIR_NOT_EMPTY:         int(fuse.ENOTEMPTY),
+	windows.ERROR_ALREADY_EXISTS:        int(fuse.EEXIST),
+	windows.ERROR_FILE_EXISTS:           int(fuse.EEXIST),
+	windows.ERROR_BROKEN_PIPE:           int(fuse.EPIPE),
+	windows.ERROR_DISK_FULL:             int(fuse.ENOSPC),
+	windows.ERROR_CALL_NOT_IMPLEMENTED:  int(fuse.ENOSYS),
+	windows.ERROR_NEGATIVE_SEEK:         int(fuse.EINVAL),
+	windows.ERROR_SEEK_ON_DEVICE:        int(fuse.ESPIPE),
+	windows.ERROR_DIRECTORY:             int(fuse.ENOTDIR),
+	windows.ERROR_NOT_EMPTY:             int(fuse.ENOTEMPTY),
+	windows.ERROR_NOT_SAME_DEVICE:       int(fuse.EXDEV),
+	windows.ERROR_CURRENT_DIRECTORY:     int(fuse.EBUSY),
+	windows.ERROR_BAD_NETPATH:           int(fuse.ENOENT),
+	windows.ERROR_NETWORK_ACCESS_DENIED: int(fuse.EACCES),
+	windows.ERROR_CANNOT_MAKE:           int(fuse.EACCES),
+	windows.ERROR_BAD_PATHNAME:          int(fuse.ENOENT),
+	windows.ERROR_FILENAME_EXCED_RANGE:  int(fuse.ENAMETOOLONG),
+	windows.ERROR_FILE_TOO_LARGE:        int(fuse.EFBIG),
+	windows.ERROR_OPERATION_ABORTED:     int(fuse.ECANCELED),
+	windows.ERROR_PRIVILEGE_NOT_HELD:    int(fuse.EPERM),
 }
 
 // errno 转换错误码
@@ -82,6 +97,81 @@ func errno(err error) int {
 	return -int(fuse.EIO)
 }
 
+// shareMode 获取通用共享模式
+// 返回: uint32 Windows 共享模式
+func shareMode() uint32 {
+	return windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE
+}
+
+// openHandle 打开 Windows 句柄
+// 入参: path 路径, access 访问权限, disposition 创建模式, attrs 文件属性
+// 返回: windows.Handle 句柄, error 错误对象
+func openHandle(path string, access uint32, disposition uint32, attrs uint32) (windows.Handle, error) {
+	pathPtr, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	return windows.CreateFile(pathPtr, access, shareMode(), nil, disposition, attrs, 0)
+}
+
+// closeHandle 关闭 Windows 句柄
+// 入参: fh 文件句柄
+// 返回: int 错误码
+func closeHandle(fh uint64) int {
+	if fh == invalidFileHandle {
+		return 0
+	}
+	return errno(windows.CloseHandle(windows.Handle(fh)))
+}
+
+// flushHandle 刷新 Windows 句柄
+// 入参: fh 文件句柄
+// 返回: int 错误码
+func flushHandle(fh uint64) int {
+	if fh == invalidFileHandle {
+		return 0
+	}
+	err := windows.FlushFileBuffers(windows.Handle(fh))
+	if err != nil {
+		if sysErr, ok := err.(syscall.Errno); ok && sysErr == windows.ERROR_ACCESS_DENIED {
+			return 0
+		}
+		return errno(err)
+	}
+	return 0
+}
+
+// timespecToFiletime 转换 FUSE 时间到 Windows 时间
+// 入参: tmsp FUSE 时间戳
+// 返回: windows.Filetime Windows 时间戳
+func timespecToFiletime(tmsp fuse.Timespec) windows.Filetime {
+	return windows.NsecToFiletime(time.Unix(tmsp.Sec, tmsp.Nsec).UnixNano())
+}
+
+// newOverlapped 创建带偏移的重叠 IO 结构
+// 入参: ofst 偏移量
+// 返回: windows.Overlapped 重叠 IO 结构, windows.Handle 事件句柄, error 错误对象
+func newOverlapped(ofst int64) (windows.Overlapped, windows.Handle, error) {
+	event, err := windows.CreateEvent(nil, 1, 0, nil)
+	if err != nil {
+		return windows.Overlapped{}, 0, err
+	}
+	overlapped := windows.Overlapped{HEvent: event}
+	overlapped.Offset = uint32(ofst)
+	overlapped.OffsetHigh = uint32(ofst >> 32)
+	return overlapped, event, nil
+}
+
+// finishOverlapped 等待重叠 IO 完成
+// 入参: h 文件句柄, overlapped 重叠 IO 结构, n 字节数指针, err IO 错误
+// 返回: error 错误对象
+func finishOverlapped(h windows.Handle, overlapped *windows.Overlapped, n *uint32, err error) error {
+	if err == windows.ERROR_IO_PENDING {
+		return windows.GetOverlappedResult(h, overlapped, n, true)
+	}
+	return err
+}
+
 // Init 初始化文件系统
 func (s *SymFS) Init() {
 	s.done = make(chan struct{})
@@ -90,7 +180,10 @@ func (s *SymFS) Init() {
 
 // Destroy 销毁文件系统
 func (s *SymFS) Destroy() {
-	close(s.done)
+	if s.done != nil {
+		close(s.done)
+		s.done = nil
+	}
 }
 
 // Statfs 获取文件系统统计信息
@@ -121,13 +214,11 @@ func (s *SymFS) Statfs(path string, stat *fuse.Statfs_t) int {
 // 入参: path 路径, mode 模式, dev 设备号
 // 返回: int 错误码
 func (s *SymFS) Mknod(path string, mode uint32, dev uint64) int {
-	path = s.realPath(path)
-	fd, err := syscall.Open(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
-	if err != nil {
-		return errno(err)
+	errc, fh := s.open(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+	if errc != 0 {
+		return errc
 	}
-	syscall.Close(fd)
-	return 0
+	return closeHandle(fh)
 }
 
 // Mkdir 创建目录
@@ -180,14 +271,33 @@ func (s *SymFS) Readlink(path string) (int, string) {
 // 入参: oldpath 旧路径, newpath 新路径
 // 返回: int 错误码
 func (s *SymFS) Rename(oldpath string, newpath string) int {
-	return errno(os.Rename(s.realPath(oldpath), s.realPath(newpath)))
+	return errno(windows.Rename(s.realPath(oldpath), s.realPath(newpath)))
+}
+
+// Rename3 重命名文件
+// 入参: oldpath 旧路径, newpath 新路径, flags 标志位
+// 返回: int 错误码
+func (s *SymFS) Rename3(oldpath string, newpath string, flags uint32) int {
+	if flags&^uint32(fuse.RENAME_NOREPLACE) != 0 {
+		return -int(fuse.EINVAL)
+	}
+	if flags&uint32(fuse.RENAME_NOREPLACE) != 0 {
+		_, err := os.Lstat(s.realPath(newpath))
+		if err == nil {
+			return -int(fuse.EEXIST)
+		}
+		if !os.IsNotExist(err) {
+			return errno(err)
+		}
+	}
+	return s.Rename(oldpath, newpath)
 }
 
 // Chmod 修改文件权限
 // 入参: path 路径, mode 模式
 // 返回: int 错误码
 func (s *SymFS) Chmod(path string, mode uint32) int {
-	return errno(os.Chmod(s.realPath(path), os.FileMode(mode)))
+	return errno(windows.Chmod(s.realPath(path), mode))
 }
 
 // Chown 修改文件所有者
@@ -201,28 +311,93 @@ func (s *SymFS) Chown(path string, uid uint32, gid uint32) int {
 // 入参: path 路径, tmsp 时间戳数组
 // 返回: int 错误码
 func (s *SymFS) Utimens(path string, tmsp []fuse.Timespec) int {
+	return s.Utimens3(path, tmsp, invalidFileHandle)
+}
+
+// Utimens3 修改文件时间
+// 入参: path 路径, tmsp 时间戳数组, fh 文件句柄
+// 返回: int 错误码
+func (s *SymFS) Utimens3(path string, tmsp []fuse.Timespec, fh uint64) int {
 	if len(tmsp) < 2 {
 		return -int(fuse.EINVAL)
 	}
 	path = s.realPath(path)
-	atime := time.Unix(tmsp[0].Sec, tmsp[0].Nsec)
-	mtime := time.Unix(tmsp[1].Sec, tmsp[1].Nsec)
-	return errno(os.Chtimes(path, atime, mtime))
+	h := windows.Handle(fh)
+	closeAfter := false
+	if fh == invalidFileHandle {
+		var err error
+		h, err = openHandle(path,
+			windows.FILE_READ_ATTRIBUTES|windows.FILE_WRITE_ATTRIBUTES,
+			windows.OPEN_EXISTING,
+			windows.FILE_FLAG_BACKUP_SEMANTICS)
+		if err != nil {
+			return errno(err)
+		}
+		closeAfter = true
+	}
+	if closeAfter {
+		defer windows.CloseHandle(h)
+	}
+	now := fuse.Now()
+	var atime *windows.Filetime
+	var mtime *windows.Filetime
+	var atimeValue windows.Filetime
+	var mtimeValue windows.Filetime
+	switch tmsp[0].Nsec {
+	case fuse.UTIME_OMIT:
+	case fuse.UTIME_NOW:
+		atimeValue = timespecToFiletime(now)
+		atime = &atimeValue
+	default:
+		atimeValue = timespecToFiletime(tmsp[0])
+		atime = &atimeValue
+	}
+	switch tmsp[1].Nsec {
+	case fuse.UTIME_OMIT:
+	case fuse.UTIME_NOW:
+		mtimeValue = timespecToFiletime(now)
+		mtime = &mtimeValue
+	default:
+		mtimeValue = timespecToFiletime(tmsp[1])
+		mtime = &mtimeValue
+	}
+	return errno(windows.SetFileTime(h, nil, atime, mtime))
 }
 
 // Access 检查文件访问权限
 // 入参: path 路径, mask 掩码
 // 返回: int 错误码
 func (s *SymFS) Access(path string, mask uint32) int {
-	_, err := os.Stat(s.realPath(path))
-	return errno(err)
+	path = s.realPath(path)
+	if mask == fuse.F_OK {
+		_, err := os.Lstat(path)
+		return errno(err)
+	}
+	access := uint32(windows.FILE_READ_ATTRIBUTES)
+	if mask&fuse.R_OK != 0 {
+		access |= windows.FILE_READ_DATA
+	}
+	if mask&fuse.W_OK != 0 {
+		access |= windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.FILE_WRITE_ATTRIBUTES
+	}
+	if mask&fuse.X_OK != 0 {
+		access |= windows.FILE_EXECUTE
+	}
+	if mask&fuse.DELETE_OK != 0 {
+		access |= windows.DELETE
+	}
+	h, err := openHandle(path, access, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS)
+	if err != nil {
+		return errno(err)
+	}
+	return errno(windows.CloseHandle(h))
 }
 
 // Create 创建并打开文件
 // 入参: path 路径, flags 标志位, mode 模式
 // 返回: int 错误码, uint64 文件句柄
 func (s *SymFS) Create(path string, flags int, mode uint32) (int, uint64) {
-	return s.open(path, flags|os.O_CREATE|os.O_TRUNC, mode)
+	return s.open(path, flags|os.O_CREATE, mode)
 }
 
 // Open 打开文件
@@ -237,11 +412,30 @@ func (s *SymFS) Open(path string, flags int) (int, uint64) {
 // 返回: int 错误码
 func (s *SymFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 	path = s.realPath(path)
+	if fh != invalidFileHandle {
+		var info windows.ByHandleFileInformation
+		if err := windows.GetFileInformationByHandle(windows.Handle(fh), &info); err != nil {
+			return errno(err)
+		}
+		s.fillStatFromHandle(stat, &info)
+		return 0
+	}
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return errno(err)
 	}
 	s.fillStat(stat, fi)
+	h, err := openHandle(path,
+		windows.FILE_READ_ATTRIBUTES,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT)
+	if err == nil {
+		var info windows.ByHandleFileInformation
+		if windows.GetFileInformationByHandle(h, &info) == nil {
+			s.applyHandleStat(stat, &info)
+		}
+		windows.CloseHandle(h)
+	}
 	return 0
 }
 
@@ -249,23 +443,34 @@ func (s *SymFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 // 入参: path 路径, size 大小, fh 文件句柄
 // 返回: int 错误码
 func (s *SymFS) Truncate(path string, size int64, fh uint64) int {
-	if fh != ^uint64(0) {
-		return errno(syscall.Ftruncate(syscall.Handle(fh), size))
+	if fh != invalidFileHandle {
+		return errno(windows.Ftruncate(windows.Handle(fh), size))
 	}
-	return errno(os.Truncate(s.realPath(path), size))
+	h, err := openHandle(s.realPath(path),
+		windows.FILE_WRITE_DATA|windows.FILE_WRITE_ATTRIBUTES,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL)
+	if err != nil {
+		return errno(err)
+	}
+	defer windows.CloseHandle(h)
+	return errno(windows.Ftruncate(h, size))
 }
 
 // Read 读取文件内容
 // 入参: path 路径, buff 缓冲区, ofst 偏移量, fh 文件句柄
 // 返回: int 读取字节数
 func (s *SymFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
-	h := syscall.Handle(fh)
-	var overlapped syscall.Overlapped
-	overlapped.Offset = uint32(ofst)
-	overlapped.OffsetHigh = uint32(ofst >> 32)
+	h := windows.Handle(fh)
+	overlapped, event, err := newOverlapped(ofst)
+	if err != nil {
+		return errno(err)
+	}
+	defer windows.CloseHandle(event)
 	var n uint32
-	err := syscall.ReadFile(h, buff, &n, &overlapped)
-	if err != nil && err != syscall.ERROR_HANDLE_EOF {
+	err = windows.ReadFile(h, buff, &n, &overlapped)
+	err = finishOverlapped(h, &overlapped, &n, err)
+	if err != nil && err != windows.ERROR_HANDLE_EOF {
 		return errno(err)
 	}
 	return int(n)
@@ -275,12 +480,15 @@ func (s *SymFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
 // 入参: path 路径, buff 缓冲区, ofst 偏移量, fh 文件句柄
 // 返回: int 写入字节数
 func (s *SymFS) Write(path string, buff []byte, ofst int64, fh uint64) int {
-	h := syscall.Handle(fh)
-	var overlapped syscall.Overlapped
-	overlapped.Offset = uint32(ofst)
-	overlapped.OffsetHigh = uint32(ofst >> 32)
+	h := windows.Handle(fh)
+	overlapped, event, err := newOverlapped(ofst)
+	if err != nil {
+		return errno(err)
+	}
+	defer windows.CloseHandle(event)
 	var n uint32
-	err := syscall.WriteFile(h, buff, &n, &overlapped)
+	err = windows.WriteFile(h, buff, &n, &overlapped)
+	err = finishOverlapped(h, &overlapped, &n, err)
 	if err != nil {
 		return errno(err)
 	}
@@ -291,35 +499,21 @@ func (s *SymFS) Write(path string, buff []byte, ofst int64, fh uint64) int {
 // 入参: path 路径, fh 文件句柄
 // 返回: int 错误码
 func (s *SymFS) Flush(path string, fh uint64) int {
-	err := syscall.FlushFileBuffers(syscall.Handle(fh))
-	if err != nil {
-		if sysErr, ok := err.(syscall.Errno); ok && sysErr == syscall.ERROR_ACCESS_DENIED {
-			return 0
-		}
-		return errno(err)
-	}
-	return 0
+	return flushHandle(fh)
 }
 
 // Release 释放文件句柄
 // 入参: path 路径, fh 文件句柄
 // 返回: int 错误码
 func (s *SymFS) Release(path string, fh uint64) int {
-	return errno(syscall.CloseHandle(syscall.Handle(fh)))
+	return closeHandle(fh)
 }
 
 // Fsync 同步文件内容
 // 入参: path 路径, datasync 是否仅同步数据, fh 文件句柄
 // 返回: int 错误码
 func (s *SymFS) Fsync(path string, datasync bool, fh uint64) int {
-	err := syscall.FlushFileBuffers(syscall.Handle(fh))
-	if err != nil {
-		if sysErr, ok := err.(syscall.Errno); ok && sysErr == syscall.ERROR_ACCESS_DENIED {
-			return 0
-		}
-		return errno(err)
-	}
-	return 0
+	return flushHandle(fh)
 }
 
 // Opendir 打开目录
@@ -327,22 +521,29 @@ func (s *SymFS) Fsync(path string, datasync bool, fh uint64) int {
 // 返回: int 错误码, uint64 目录句柄
 func (s *SymFS) Opendir(path string) (int, uint64) {
 	path = s.realPath(path)
-	fi, err := os.Stat(path)
+	fi, err := os.Lstat(path)
 	if err != nil {
-		return errno(err), ^uint64(0)
+		return errno(err), invalidFileHandle
 	}
 	if !fi.IsDir() {
-		return -int(fuse.ENOTDIR), ^uint64(0)
+		return -int(fuse.ENOTDIR), invalidFileHandle
 	}
-	return 0, 0
+	h, err := openHandle(path,
+		windows.FILE_LIST_DIRECTORY|windows.FILE_READ_ATTRIBUTES,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS)
+	if err != nil {
+		return errno(err), invalidFileHandle
+	}
+	return 0, uint64(h)
 }
 
 // Readdir 读取目录内容
 // 入参: path 路径, fill 填充函数, ofst 偏移量, fh 目录句柄
 // 返回: int 错误码
 func (s *SymFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofst int64) bool, ofst int64, fh uint64) int {
-	path = s.realPath(path)
-	f, err := os.Open(path)
+	realPath := s.realPath(path)
+	f, err := os.Open(realPath)
 	if err != nil {
 		return errno(err)
 	}
@@ -351,10 +552,17 @@ func (s *SymFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, o
 	if err != nil {
 		return errno(err)
 	}
-	fill(".", nil, 0)
+	var dot fuse.Stat_t
+	if s.Getattr(path, &dot, invalidFileHandle) == 0 {
+		fill(".", &dot, 0)
+	} else {
+		fill(".", nil, 0)
+	}
 	fill("..", nil, 0)
 	for _, entry := range entries {
-		if !fill(entry.Name(), nil, 0) {
+		var stat fuse.Stat_t
+		s.fillStat(&stat, entry)
+		if !fill(entry.Name(), &stat, 0) {
 			break
 		}
 	}
@@ -365,14 +573,70 @@ func (s *SymFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, o
 // 入参: path 路径, fh 目录句柄
 // 返回: int 错误码
 func (s *SymFS) Releasedir(path string, fh uint64) int {
-	return 0
+	return closeHandle(fh)
 }
 
 // Fsyncdir 同步目录内容
 // 入参: path 路径, datasync 是否仅同步数据, fh 目录句柄
 // 返回: int 错误码
 func (s *SymFS) Fsyncdir(path string, datasync bool, fh uint64) int {
+	return flushHandle(fh)
+}
+
+// Chflags 修改文件属性
+// 入参: path 路径, flags BSD 标志位
+// 返回: int 错误码
+func (s *SymFS) Chflags(path string, flags uint32) int {
+	path = s.realPath(path)
+	pathPtr, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return errno(err)
+	}
+	attrs, err := windows.GetFileAttributes(pathPtr)
+	if err != nil {
+		return errno(err)
+	}
+	return errno(windows.SetFileAttributes(pathPtr, flagsToAttributes(attrs, flags)))
+}
+
+// Setcrtime 修改文件创建时间
+// 入参: path 路径, tmsp 时间戳
+// 返回: int 错误码
+func (s *SymFS) Setcrtime(path string, tmsp fuse.Timespec) int {
+	if tmsp.Nsec == fuse.UTIME_OMIT {
+		return 0
+	}
+	if tmsp.Nsec == fuse.UTIME_NOW {
+		tmsp = fuse.Now()
+	}
+	h, err := openHandle(s.realPath(path),
+		windows.FILE_WRITE_ATTRIBUTES,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS)
+	if err != nil {
+		return errno(err)
+	}
+	defer windows.CloseHandle(h)
+	ctime := timespecToFiletime(tmsp)
+	return errno(windows.SetFileTime(h, &ctime, nil, nil))
+}
+
+// Setchgtime 修改文件变更时间
+// 入参: path 路径, tmsp 时间戳
+// 返回: int 错误码
+func (s *SymFS) Setchgtime(path string, tmsp fuse.Timespec) int {
 	return 0
+}
+
+// Getpath 获取真实大小写路径
+// 入参: path 路径, fh 文件句柄
+// 返回: int 错误码, string 真实路径
+func (s *SymFS) Getpath(path string, fh uint64) (int, string) {
+	actual, err := s.casePath(path)
+	if err != nil {
+		return errno(err), ""
+	}
+	return 0, actual
 }
 
 // Setxattr 设置扩展属性
@@ -408,29 +672,26 @@ func (s *SymFS) Listxattr(path string, fill func(name string) bool) int {
 // 返回: int 错误码, uint64 文件句柄
 func (s *SymFS) open(path string, flags int, mode uint32) (int, uint64) {
 	path = s.realPath(path)
-	pathPtr, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return errno(err), ^uint64(0)
-	}
-	var access uint32
+	access := uint32(windows.FILE_READ_ATTRIBUTES | windows.FILE_WRITE_ATTRIBUTES)
 	switch flags & (os.O_RDONLY | os.O_WRONLY | os.O_RDWR) {
 	case os.O_RDONLY:
-		access = windows.GENERIC_READ
+		access |= windows.FILE_GENERIC_READ
 	case os.O_WRONLY:
-		access = windows.GENERIC_WRITE
+		access |= windows.FILE_GENERIC_WRITE
 	case os.O_RDWR:
-		access = windows.GENERIC_READ | windows.GENERIC_WRITE
+		access |= windows.FILE_GENERIC_READ | windows.FILE_GENERIC_WRITE
 	}
 	if flags&os.O_CREATE != 0 {
-		access |= windows.GENERIC_WRITE
+		access |= windows.FILE_GENERIC_WRITE
+	}
+	if flags&os.O_TRUNC != 0 {
+		access |= windows.FILE_WRITE_DATA
 	}
 	if flags&os.O_APPEND != 0 {
-		access &^= windows.GENERIC_WRITE
+		access &^= windows.FILE_WRITE_DATA
 		access |= windows.FILE_APPEND_DATA
 	}
-	shareMode := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE)
 	var createDisposition uint32
-	var needTruncate bool
 	switch {
 	case flags&(os.O_CREATE|os.O_EXCL) == (os.O_CREATE | os.O_EXCL):
 		createDisposition = windows.CREATE_NEW
@@ -439,25 +700,14 @@ func (s *SymFS) open(path string, flags int, mode uint32) (int, uint64) {
 	case flags&os.O_CREATE == os.O_CREATE:
 		createDisposition = windows.OPEN_ALWAYS
 	case flags&os.O_TRUNC == os.O_TRUNC:
-		createDisposition = windows.OPEN_EXISTING
-		needTruncate = true
+		createDisposition = windows.TRUNCATE_EXISTING
 	default:
 		createDisposition = windows.OPEN_EXISTING
 	}
-	attrs := uint32(windows.FILE_ATTRIBUTE_NORMAL)
-	h, err := windows.CreateFile(pathPtr, access, shareMode, nil, createDisposition, attrs, 0)
+	attrs := createAttributes(mode) | windows.FILE_FLAG_OVERLAPPED
+	h, err := openHandle(path, access, createDisposition, attrs)
 	if err != nil {
-		return errno(err), ^uint64(0)
-	}
-	if needTruncate {
-		err = windows.SetEndOfFile(h)
-		if err != nil {
-			windows.CloseHandle(h)
-			h, err = windows.CreateFile(pathPtr, access, shareMode, nil, windows.TRUNCATE_EXISTING, attrs, 0)
-			if err != nil {
-				return errno(err), ^uint64(0)
-			}
-		}
+		return errno(err), invalidFileHandle
 	}
 	return 0, uint64(h)
 }
@@ -568,15 +818,178 @@ func (s *SymFS) watch() {
 	}
 }
 
+// createAttributes 获取创建文件属性
+// 入参: mode 文件模式
+// 返回: uint32 Windows 文件属性
+func createAttributes(mode uint32) uint32 {
+	if mode&0222 == 0 {
+		return windows.FILE_ATTRIBUTE_READONLY
+	}
+	return windows.FILE_ATTRIBUTE_NORMAL
+}
+
+// attributesToFlags 转换 Windows 属性到 BSD 标志位
+// 入参: attrs Windows 文件属性
+// 返回: uint32 BSD 标志位
+func attributesToFlags(attrs uint32) uint32 {
+	var flags uint32
+	if attrs&windows.FILE_ATTRIBUTE_HIDDEN != 0 {
+		flags |= fuse.UF_HIDDEN
+	}
+	if attrs&windows.FILE_ATTRIBUTE_READONLY != 0 {
+		flags |= fuse.UF_READONLY
+	}
+	if attrs&windows.FILE_ATTRIBUTE_SYSTEM != 0 {
+		flags |= fuse.UF_SYSTEM
+	}
+	if attrs&windows.FILE_ATTRIBUTE_ARCHIVE != 0 {
+		flags |= fuse.UF_ARCHIVE
+	}
+	return flags
+}
+
+// flagsToAttributes 转换 BSD 标志位到 Windows 属性
+// 入参: attrs 原 Windows 文件属性, flags BSD 标志位
+// 返回: uint32 新 Windows 文件属性
+func flagsToAttributes(attrs uint32, flags uint32) uint32 {
+	attrs &^= windows.FILE_ATTRIBUTE_NORMAL |
+		windows.FILE_ATTRIBUTE_HIDDEN |
+		windows.FILE_ATTRIBUTE_READONLY |
+		windows.FILE_ATTRIBUTE_SYSTEM |
+		windows.FILE_ATTRIBUTE_ARCHIVE
+	if flags&fuse.UF_HIDDEN != 0 {
+		attrs |= windows.FILE_ATTRIBUTE_HIDDEN
+	}
+	if flags&fuse.UF_READONLY != 0 {
+		attrs |= windows.FILE_ATTRIBUTE_READONLY
+	}
+	if flags&fuse.UF_SYSTEM != 0 {
+		attrs |= windows.FILE_ATTRIBUTE_SYSTEM
+	}
+	if flags&fuse.UF_ARCHIVE != 0 {
+		attrs |= windows.FILE_ATTRIBUTE_ARCHIVE
+	}
+	if attrs == 0 {
+		attrs |= windows.FILE_ATTRIBUTE_NORMAL
+	}
+	return attrs
+}
+
+// applyReadonlyMode 应用只读属性到模式
+// 入参: stat 统计信息结构体指针, attrs Windows 文件属性
+func applyReadonlyMode(stat *fuse.Stat_t, attrs uint32) {
+	if attrs&windows.FILE_ATTRIBUTE_READONLY != 0 {
+		stat.Mode &^= fuse.S_IWUSR | fuse.S_IWGRP | fuse.S_IWOTH
+		return
+	}
+	if stat.Mode&fuse.S_IFMT != fuse.S_IFLNK {
+		stat.Mode |= fuse.S_IWUSR | fuse.S_IWGRP | fuse.S_IWOTH
+	}
+}
+
+// filetimeToTimespec 转换 Windows 时间到 FUSE 时间
+// 入参: ft Windows 时间戳
+// 返回: fuse.Timespec FUSE 时间戳
+func filetimeToTimespec(ft windows.Filetime) fuse.Timespec {
+	return fuse.NewTimespec(time.Unix(0, ft.Nanoseconds()))
+}
+
+// setBlocks 填充块信息
+// 入参: stat 统计信息结构体指针
+func setBlocks(stat *fuse.Stat_t) {
+	const blockSize = 4096
+	stat.Blksize = blockSize
+	stat.Blocks = (stat.Size + 511) / 512
+}
+
+// fillStatFromHandle 通过句柄信息填充统计信息
+// 入参: stat 统计信息结构体指针, info Windows 句柄信息
+func (s *SymFS) fillStatFromHandle(stat *fuse.Stat_t, info *windows.ByHandleFileInformation) {
+	*stat = fuse.Stat_t{}
+	mode := uint32(0666)
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+		mode = 0777 | fuse.S_IFDIR
+	} else {
+		mode |= fuse.S_IFREG
+	}
+	stat.Mode = mode
+	s.applyHandleStat(stat, info)
+}
+
+// applyHandleStat 应用 Windows 句柄统计信息
+// 入参: stat 统计信息结构体指针, info Windows 句柄信息
+func (s *SymFS) applyHandleStat(stat *fuse.Stat_t, info *windows.ByHandleFileInformation) {
+	size := int64(uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow))
+	if stat.Mode&fuse.S_IFMT != fuse.S_IFLNK {
+		stat.Size = size
+	}
+	stat.Atim = filetimeToTimespec(info.LastAccessTime)
+	stat.Mtim = filetimeToTimespec(info.LastWriteTime)
+	stat.Ctim = stat.Mtim
+	stat.Birthtim = filetimeToTimespec(info.CreationTime)
+	stat.Dev = uint64(info.VolumeSerialNumber)
+	stat.Ino = uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow)
+	stat.Nlink = info.NumberOfLinks
+	if stat.Nlink == 0 {
+		stat.Nlink = 1
+	}
+	stat.Uid = 0
+	stat.Gid = 0
+	stat.Flags = attributesToFlags(info.FileAttributes)
+	applyReadonlyMode(stat, info.FileAttributes)
+	setBlocks(stat)
+}
+
+// casePath 获取真实大小写路径
+// 入参: path 路径
+// 返回: string 真实路径, error 错误对象
+func (s *SymFS) casePath(path string) (string, error) {
+	path = strings.ReplaceAll(path, "\\", "/")
+	path = strings.Trim(path, "/")
+	if path == "" {
+		return "/", nil
+	}
+	dir := s.root
+	parts := strings.Split(path, "/")
+	actual := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		if part == ".." {
+			return "", windows.ERROR_INVALID_NAME
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return "", err
+		}
+		name := ""
+		for _, entry := range entries {
+			if strings.EqualFold(entry.Name(), part) {
+				name = entry.Name()
+				break
+			}
+		}
+		if name == "" {
+			return "", windows.ERROR_FILE_NOT_FOUND
+		}
+		actual = append(actual, name)
+		dir = filepath.Join(dir, name)
+	}
+	return "/" + strings.Join(actual, "/"), nil
+}
+
 // fillStat 填充统计信息
 // 入参: stat 统计信息结构体指针, fi 文件信息接口
 func (s *SymFS) fillStat(stat *fuse.Stat_t, fi os.FileInfo) {
+	*stat = fuse.Stat_t{}
 	stat.Size = fi.Size()
 	stat.Mtim = fuse.NewTimespec(fi.ModTime())
 	if sys, ok := fi.Sys().(*syscall.Win32FileAttributeData); ok {
 		stat.Atim = fuse.NewTimespec(time.Unix(0, sys.LastAccessTime.Nanoseconds()))
 		stat.Birthtim = fuse.NewTimespec(time.Unix(0, sys.CreationTime.Nanoseconds()))
 		stat.Ctim = stat.Mtim
+		stat.Flags = attributesToFlags(sys.FileAttributes)
 	} else {
 		stat.Atim = stat.Mtim
 		stat.Ctim = stat.Mtim
@@ -594,4 +1007,8 @@ func (s *SymFS) fillStat(stat *fuse.Stat_t, fi os.FileInfo) {
 	stat.Nlink = 1
 	stat.Uid = 0
 	stat.Gid = 0
+	if sys, ok := fi.Sys().(*syscall.Win32FileAttributeData); ok {
+		applyReadonlyMode(stat, sys.FileAttributes)
+	}
+	setBlocks(stat)
 }

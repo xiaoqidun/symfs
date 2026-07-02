@@ -45,6 +45,8 @@ func main() {
 	host := fuse.NewFileSystemHost(symfs)
 	symfs.SetHost(host)
 	host.SetCapReaddirPlus(true)
+	host.SetCapDeleteAccess(true)
+	host.SetCapCaseInsensitive(true)
 	if !host.Mount(target, opts) {
 		fmt.Fprintf(os.Stderr, "无法完成挂载\n")
 		os.Exit(1)

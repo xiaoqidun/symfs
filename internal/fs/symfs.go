@@ -16,6 +16,7 @@ package fs
 
 import (
 	"path/filepath"
+	"strings"
 
 	"github.com/winfsp/cgofuse/fuse"
 )
@@ -45,5 +46,6 @@ func (s *SymFS) SetHost(host *fuse.FileSystemHost) {
 // 入参: path 相对路径
 // 返回: string 绝对路径
 func (s *SymFS) realPath(path string) string {
-	return filepath.Join(s.root, path)
+	path = strings.TrimLeft(path, `/\`)
+	return filepath.Join(s.root, filepath.FromSlash(path))
 }
